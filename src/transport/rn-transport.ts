@@ -11,7 +11,6 @@ type WebViewRefLike = { current: WebViewLike | null };
 // send: WebView로 inject — web 쪽 window.dispatchEvent로 도착.
 // onMessage: 등록된 listener를 push 받기 위해 추가 메서드 pushMessage 노출.
 //   사용자가 <WebView onMessage={(e) => transport.pushMessage(e.nativeEvent.data)} />로 wiring.
-//   prop wiring을 자동화하는 wrapper 컴포넌트는 v2의 @peelie/bridge/react-native에서 제공.
 export type RnTransport = Transport & {
     pushMessage: (data: string) => void;
 };
