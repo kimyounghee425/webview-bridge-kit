@@ -1,316 +1,171 @@
 # webview-bridge-kit
 
-WebView 안의 웹 앱과 React Native 셸 사이에서 타입 안전하게 메시지를 주고받는 브릿지 패키지입니다.
+A type-safe bridge for passing messages between a web app inside a WebView and its React Native host.
+Both sides import one contract, so message types line up at compile time and are validated at runtime.
 
-| 종류        | 방향         | 용도                             |
-| ----------- | ------------ | -------------------------------- |
-| **request** | web → native | 응답이 필요한 호출               |
-| **command** | web → native | 응답이 필요 없는 명령            |
-| **event**   | native → web | 네이티브에서 웹으로 보내는 알림 |
+**English** · [한국어](#한국어)
 
-## 기본 사용법
+📖 **[Documentation](https://kimyounghee425.github.io/webview-bridge-kit/en/)** · [한국어 문서](https://kimyounghee425.github.io/webview-bridge-kit/)
 
-### 1. Contract 정의
+| Kind        | Direction    | Reply | Use for                                          |
+| ----------- | ------------ | ----- | ------------------------------------------------ |
+| **request** | web → native | yes   | Calls that need a response (login, fetch a token) |
+| **command** | web → native | no    | Fire-and-forget orders (open a screen, send logs) |
+| **event**   | native → web | no    | Native → web notifications (deep links, app state) |
 
-웹과 네이티브가 같은 contract를 import해서 사용합니다. schema를 넣으면 TypeScript 타입 추론과 런타임 검증이 같이 동작합니다.
-schema가 없으면 payload/response는 `void`입니다.
+## Install
+
+```bash
+npm install webview-bridge-kit
+# on a React Native host
+npm install react-native-webview
+```
+
+The core has no runtime dependencies. A validation schema (zod, etc.) is optional. (Node >= 18, React >= 18)
+
+## Quick example
+
+**1. Contract — shared by web/native (keep it identical on both sides if you're not in a monorepo)**
 
 ```ts
-// shared/bridge-contract.ts
-import { z } from 'zod';
+// bridge-contract.ts
 import { command, defineContract, event, request } from 'webview-bridge-kit';
-
-const TokenSchema = z.object({ token: z.string() });
-const KakaoLoginSchema = z.object({ accessToken: z.string(), userId: z.string() });
-const UsernameSchema = z.object({ username: z.string() });
-const TimestampSchema = z.object({ timestamp: z.number() });
-const UriSchema = z.object({ uri: z.string() });
+import { z } from 'zod';
 
 export const contract = defineContract({
-  GET_FCM_TOKEN: request({ response: TokenSchema }),
-  KAKAO_LOGIN: request({ response: KakaoLoginSchema, timeout: 'none' }),
-  PING: request(),
-
+  KAKAO_LOGIN: request({ response: z.object({ accessToken: z.string() }) }),
   OPEN_CAMERA: command(),
-  OPEN_INSTAGRAM: command({ payload: UsernameSchema }),
-
-  APP_FOREGROUND: event(),
-  APP_RESUME: event({ payload: TimestampSchema }),
-  PHOTO_TAKEN: event({ payload: UriSchema }),
+  PHOTO_TAKEN: event({ payload: z.object({ uri: z.string() }) }),
 });
 ```
 
-schema는 `parse(value: unknown): T` 메서드를 가진 객체면 됩니다.
+**2. Web (inside the WebView)**
 
-### 2. Web: BridgeClient 생성
-
-웹 앱에서는 `createBridgeClient`를 한 번 호출해서 typed Provider/hooks를 만듭니다.
-
-```ts
-// app/bridge.ts
+```tsx
 import { createBridgeClient } from 'webview-bridge-kit/react';
-import { contract } from '@/shared/bridge-contract';
+import { contract } from './bridge-contract';
 
-export const { BridgeProvider, useBridge, useBridgeEvent } = createBridgeClient(contract, {
-  logger: import.meta.env.DEV ? console : undefined,
-  defaultOptions: {
-    request: { timeout: 30_000 },
-  },
-});
-```
+export const { BridgeProvider, useBridge, useBridgeEvent } = createBridgeClient(contract);
 
-`contract`와 `options`는 `createBridgeClient`를 호출한 시점의 값으로 고정됩니다. 렌더 중 options 객체가 바뀌는 문제를 만들지 않기 위해 Provider prop으로 options를 받지 않습니다.
-
-### 3. Web: Provider 설치
-
-앱 최상단에서 `BridgeProvider`를 한 번만 감쌉니다.
-
-```tsx
-// App.tsx
-import { BridgeProvider } from '@/app/bridge';
-
-export function App() {
-  return (
-    <BridgeProvider>
-      <AppRoutes />
-    </BridgeProvider>
-  );
-}
-```
-
-`BridgeProvider`는 내부에서 web bridge를 만들고, unmount 시 자동으로 정리합니다.
-
-### 4. Web: request/command/event 사용
-
-하위 컴포넌트에서는 `useBridge`와 `useBridgeEvent`를 사용합니다.
-
-```tsx
-import { useBridge, useBridgeEvent } from '@/app/bridge';
-
-export function CameraButton() {
-  const bridge = useBridge();
-
-  useBridgeEvent('PHOTO_TAKEN', ({ uri }) => {
-    upload(uri);
-  });
-
-  return <button onClick={() => bridge.send('OPEN_CAMERA')}>Open camera</button>;
-}
-```
-
-```ts
-const { token } = await bridge.request('GET_FCM_TOKEN');
-await bridge.request('KAKAO_LOGIN', undefined, { timeout: 'none' });
-
-bridge.send('OPEN_INSTAGRAM', { username: 'peelie' });
+// in a component
+const bridge = useBridge();
+const { accessToken } = await bridge.request('KAKAO_LOGIN');
 bridge.send('OPEN_CAMERA');
+useBridgeEvent('PHOTO_TAKEN', ({ uri }) => upload(uri));
 ```
 
-`useBridgeEvent`는 mount 시 구독하고 unmount 시 자동으로 해제합니다. handler는 최신 렌더의 함수를 사용하므로 stale closure를 피하기 위해 직접 `ref`를 만들 필요가 없습니다.
-
-페이로드가 `void`이면 인자를 생략합니다.
-
-```ts
-bridge.request('GET_FCM_TOKEN');
-bridge.send('OPEN_CAMERA');
-```
-
-### 5. Native: handler 연결
-
-네이티브에서는 `useNativeBridge`로 web → native request/command handler를 연결합니다.
+**3. React Native (host)**
 
 ```tsx
-import { useRef } from 'react';
-import { Linking } from 'react-native';
-import { WebView } from 'react-native-webview';
 import { useNativeBridge } from 'webview-bridge-kit/react-native';
-import { contract } from '@/shared/bridge-contract';
+import { contract } from './bridge-contract';
 
-export default function App() {
-  const ref = useRef<WebView>(null);
+const ref = useRef<WebView>(null);
+const { bridge, pushMessage } = useNativeBridge(ref, contract, {
+  KAKAO_LOGIN: async () => ({ accessToken: await kakaoLogin() }),
+  OPEN_CAMERA: () => router.push('/camera'),
+});
 
-  const { bridge, pushMessage } = useNativeBridge(ref, contract, {
-    GET_FCM_TOKEN: async () => ({ token: await messaging().getToken() }),
-    KAKAO_LOGIN: async () => kakaoLogin(),
-    PING: () => {},
-    OPEN_CAMERA: () => router.push('/screen/CameraScreen'),
-    OPEN_INSTAGRAM: ({ username }) =>
-      Linking.openURL(`instagram://user?username=${username}`).catch(() =>
-        Linking.openURL(`https://instagram.com/${username}`),
-      ),
-  });
+// wiring pushMessage is required
+<WebView ref={ref} onMessage={(e) => pushMessage(e.nativeEvent.data)} />;
 
-  return (
-    <WebView
-      ref={ref}
-      source={{ uri: 'https://your-web.app' }}
-      onMessage={(e) => pushMessage(e.nativeEvent.data)}
-    />
-  );
-}
+// native → web event
+bridge.emit('PHOTO_TAKEN', { uri });
 ```
 
-`pushMessage`는 WebView의 `onMessage`로 받은 raw string을 bridge에 전달합니다. 이 줄이 없으면 web → native 메시지가 native handler까지 도달하지 않습니다.
+## Docs
 
-네이티브에서 웹으로 event를 보낼 때는 `bridge.emit`을 사용합니다.
+Install, defining a contract, React / React Native usage, options, and error handling are covered on the docs site.
+
+→ **https://kimyounghee425.github.io/webview-bridge-kit/en/**
+
+## License
+
+[MIT](./LICENSE)
+
+---
+
+# 한국어
+
+WebView 안의 웹 앱과 React Native 호스트 사이에서 타입 안전하게 메시지를 주고받는 브릿지입니다.
+하나의 contract를 웹과 네이티브가 함께 import 해서, 메시지 타입을 컴파일 타임에 맞추고 런타임에서도 검증합니다.
+
+[English](#webview-bridge-kit) · **한국어**
+
+📖 **[문서 사이트](https://kimyounghee425.github.io/webview-bridge-kit/)** · [English docs](https://kimyounghee425.github.io/webview-bridge-kit/en/)
+
+| 종류        | 방향         | 응답 | 용도                              |
+| ----------- | ------------ | ---- | --------------------------------- |
+| **request** | web → native | O    | 응답이 필요한 호출 (로그인, 토큰 조회) |
+| **command** | web → native | X    | 응답이 필요 없는 명령 (화면 열기, 로그) |
+| **event**   | native → web | X    | 네이티브 → 웹 알림 (딥링크, 앱 상태)   |
+
+## 설치
+
+```bash
+npm install webview-bridge-kit
+# React Native 호스트라면
+npm install react-native-webview
+```
+
+코어는 런타임 의존성이 없습니다. 검증 스키마(zod 등)는 선택입니다. (Node >= 18, React >= 18)
+
+## 빠른 예제
+
+**1. Contract — 웹/네이티브가 공유 (모노레포가 아니면 양쪽에 동일하게 둡니다)**
 
 ```ts
-bridge.emit('PHOTO_TAKEN', { uri: photo.uri });
+// bridge-contract.ts
+import { command, defineContract, event, request } from 'webview-bridge-kit';
+import { z } from 'zod';
 
-AppState.addEventListener('change', (state) => {
-  if (state === 'active') bridge.emit('APP_FOREGROUND');
+export const contract = defineContract({
+  KAKAO_LOGIN: request({ response: z.object({ accessToken: z.string() }) }),
+  OPEN_CAMERA: command(),
+  PHOTO_TAKEN: event({ payload: z.object({ uri: z.string() }) }),
 });
 ```
 
-## Options
-
-`createBridgeClient`와 `useNativeBridge`는 같은 options 모양을 사용합니다.
-
-```ts
-type BridgeOptions = {
-  defaultOptions?: {
-    request?: {
-      timeout?: number | 'none';
-    };
-  };
-  logger?: Logger;
-};
-```
-
-타임아웃은 호출 시점 > contract 정의 > 인스턴스 default 순서로 적용됩니다. 로그인, 카메라처럼 사용자 인터랙션이 길어질 수 있는 request는 `timeout: 'none'`을 사용할 수 있습니다.
-
-```ts
-await bridge.request('KAKAO_LOGIN', undefined, { timeout: 'none' });
-```
-
-`logger`는 브릿지가 메시지를 처리하다가 버리는 상황을 기록할 때 사용합니다.
-
-- 깨진 JSON이 들어온 경우
-- 지원하지 않는 protocol version이 들어온 경우
-- contract에 없는 command/event가 들어온 경우
-- command/event payload가 schema와 맞지 않아 drop된 경우
-- native command handler가 throw한 경우
-
-직접 호출한 request 실패는 `logger`가 아니라 `try/catch`로 처리합니다.
-
-## 에러 처리
-
-request는 실패하면 reject됩니다.
-
-```ts
-import {
-  BridgeDisposedError,
-  BridgeHandlerError,
-  BridgeTimeoutError,
-  BridgeUnknownMessageError,
-  BridgeValidationError,
-} from 'webview-bridge-kit';
-
-try {
-  await bridge.request('GET_FCM_TOKEN');
-} catch (e) {
-  if (e instanceof BridgeTimeoutError) {
-    // request timeout
-  }
-  if (e instanceof BridgeValidationError) {
-    // schema validation failed
-  }
-  if (e instanceof BridgeUnknownMessageError) {
-    // contract에 없는 request 또는 native UNKNOWN_MESSAGE 응답
-  }
-  if (e instanceof BridgeHandlerError) {
-    // native request handler가 throw한 경우
-  }
-  if (e instanceof BridgeDisposedError) {
-    // dispose 이후 사용 또는 pending request 정리
-  }
-}
-```
-
-`bridge.send()`와 `bridge.emit()`에서 payload schema 검증이 실패하면 `BridgeValidationError`를 throw합니다. contract에 없는 command/event는 throw하지 않고 `logger.warn` 후 drop합니다.
-
-## 런타임 검증
-
-schema가 붙은 자리는 양방향으로 검증됩니다.
-
-| 상황                         | request                              | command/event                 |
-| ---------------------------- | ------------------------------------ | ----------------------------- |
-| contract에 없는 이름 호출    | `BridgeUnknownMessageError` reject   | drop + `logger.warn`          |
-| 내가 보낸 값이 schema와 다름 | `BridgeValidationError` reject       | `BridgeValidationError` throw |
-| 상대가 잘못 보낸 메시지      | 응답 에러로 돌려주고 caller가 reject | drop + `logger.warn`          |
-
-schema는 같은 입력에 같은 출력을 내도록 작성하세요. 시간/랜덤값이 섞인 transform은 피하는 것이 안전합니다.
-
-## 테스트
-
-테스트에서는 `webview-bridge-kit/testing`의 `createTestBridge`로 web/native bridge 한 쌍을 만들 수 있습니다.
-
-```ts
-import { createTestBridge } from 'webview-bridge-kit/testing';
-import { contract } from '@/shared/bridge-contract';
-
-const { web, native } = createTestBridge(contract, {
-  GET_FCM_TOKEN: async () => ({ token: 'test-token' }),
-  OPEN_CAMERA: () => {},
-});
-
-await expect(web.request('GET_FCM_TOKEN')).resolves.toEqual({ token: 'test-token' });
-
-const handler = vi.fn();
-web.on('PHOTO_TAKEN', handler);
-native.emit('PHOTO_TAKEN', { uri: 'file://photo.jpg' });
-```
-
-테스트 helper는 handler를 부분적으로만 넘길 수 있습니다. 등록되지 않은 request를 호출하면 실제 native와 같은 방식으로 `BridgeUnknownMessageError`가 발생합니다.
-
-## Public API
-
-### `webview-bridge-kit`
-
-- `defineContract`
-- `request`
-- `command`
-- `event`
-- request 에러 클래스들
-- core low-level API
-
-### `webview-bridge-kit/react`
-
-- `createBridgeClient`
-- `useWebBridge`
-- `BridgeClient`
-- `BridgeProviderProps`
-
-### `webview-bridge-kit/react-native`
-
-- `useNativeBridge`
-
-### `webview-bridge-kit/testing`
-
-- `createTestBridge`
-
-## Low-level API
-
-대부분의 웹 앱은 `createBridgeClient`를 사용하면 됩니다. React Context를 쓰지 않거나 transport를 직접 제어해야 할 때만 low-level API를 사용합니다.
-
-```ts
-import { createWebBridge, webTransport } from 'webview-bridge-kit';
-import { contract } from '@/shared/bridge-contract';
-
-const bridge = createWebBridge(webTransport(), contract);
-```
-
-```ts
-import { createNativeBridge, rnTransport } from 'webview-bridge-kit';
-import { contract } from '@/shared/bridge-contract';
-
-const nativeBridge = createNativeBridge(rnTransport(ref), contract).bind(handlers);
-```
-
-React 컴포넌트 안에서 직접 web bridge 생명주기만 관리하고 싶다면 `useWebBridge`를 사용할 수 있습니다.
+**2. Web (WebView 내부)**
 
 ```tsx
-import { useWebBridge } from 'webview-bridge-kit/react';
+import { createBridgeClient } from 'webview-bridge-kit/react';
+import { contract } from './bridge-contract';
 
-const bridge = useWebBridge(contract);
+export const { BridgeProvider, useBridge, useBridgeEvent } = createBridgeClient(contract);
+
+// 컴포넌트에서
+const bridge = useBridge();
+const { accessToken } = await bridge.request('KAKAO_LOGIN');
+bridge.send('OPEN_CAMERA');
+useBridgeEvent('PHOTO_TAKEN', ({ uri }) => upload(uri));
 ```
+
+**3. React Native (호스트)**
+
+```tsx
+import { useNativeBridge } from 'webview-bridge-kit/react-native';
+import { contract } from './bridge-contract';
+
+const ref = useRef<WebView>(null);
+const { bridge, pushMessage } = useNativeBridge(ref, contract, {
+  KAKAO_LOGIN: async () => ({ accessToken: await kakaoLogin() }),
+  OPEN_CAMERA: () => router.push('/camera'),
+});
+
+// pushMessage 연결은 필수
+<WebView ref={ref} onMessage={(e) => pushMessage(e.nativeEvent.data)} />;
+
+// 네이티브 → 웹 event
+bridge.emit('PHOTO_TAKEN', { uri });
+```
+
+## 문서
+
+설치, Contract 정의, React / React Native 사용법, 옵션, 에러 처리는 문서 사이트에서 다룹니다.
+
+→ **https://kimyounghee425.github.io/webview-bridge-kit/**
+
+## License
+
+[MIT](./LICENSE)

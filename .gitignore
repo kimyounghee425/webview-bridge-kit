@@ -7,3 +7,7 @@ coverage
 .idea
 .omc
 .claude
+
+# VitePress
+docs/.vitepress/dist
+docs/.vitepress/cache
